@@ -1191,7 +1191,7 @@ class QuestRuntime:
         return suggestion
 
     def get_exit_readiness(self, player_id: str) -> Optional[Dict[str, Any]]:
-        """Return exit readiness snapshot for the player (stub)."""
+        """Return exit readiness snapshot for the player."""
 
         state = self._players.get(player_id)
         if not state:
@@ -1200,8 +1200,22 @@ class QuestRuntime:
         if self._all_tasks_completed(state):
             return {"exit_ready": True}
 
-        # TODO: incorporate exit phrases and milestones from ExitConfig.
-        return None
+        # Incorporate exit phrases and milestones from ExitConfig.
+        level = state.get("level")
+        exit_cfg = getattr(level, "exit", None) if level else None
+        phrase_aliases: List[str] = list(getattr(exit_cfg, "phrase_aliases", None) or [])
+
+        completed_milestones: List[str] = []
+        for session in self._iter_sessions(state):
+            for milestone in session.milestones:
+                if milestone.status == "completed":
+                    completed_milestones.append(milestone.id)
+
+        return {
+            "exit_ready": False,
+            "exit_phrases": phrase_aliases,
+            "completed_milestones": completed_milestones,
+        }
 
     # ------------------------------------------------------------------
     # Lifecycle

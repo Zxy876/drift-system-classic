@@ -3235,6 +3235,17 @@ def api_story_state(player_id: str):
     return {"status": "ok", "state": story_engine.get_public_state(player_id)}
 
 
+@router.post("/state/{player_id}")
+def api_story_state_post(player_id: str):
+    """POST variant of the state endpoint.
+
+    The Minecraft plugin's StoryManager uses postJsonAsync to call this path
+    so that it can share a single Callback-based HTTP helper. The response is
+    identical to the GET variant.
+    """
+    return {"status": "ok", "state": story_engine.get_public_state(player_id)}
+
+
 # ============================================================
 # ⭐ NEW：创建新的剧情关卡（以 JSON Body 注入）
 # ============================================================
