@@ -127,29 +127,48 @@ drift-system/
 
 ---
 
+## Hosted Backend
+
+```
+https://drift-backend-production.up.railway.app
+```
+
+DriftSystem uses a hosted backend. Install the plugin and start the server. No backend setup required.
+
+> Local development: edit `backend_url` in `plugins/DriftSystem/config.yml` to point at your local instance.
+
+---
+
 ## Quick Start
 
-### Backend Setup
+### Plugin (Hosted Backend — No Setup Required)
+1. Download `drift-plugin.jar` from the [v1 Release](https://github.com/Zxy876/drift-system-classic/releases/tag/drift-v1)
+2. Drop into your server's `plugins/` folder
+3. Start the server — connects to `https://drift-backend-production.up.railway.app` automatically
+
+### Backend Setup (Self-hosted / Development)
 ```bash
 cd backend
 pip install -r requirements.txt
-python -m app.main
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-### Plugin Setup
+### Plugin Build from Source
 ```bash
-cd plugin/mc_plugin
-./build_plugin.sh
-# Copy resulting .jar to Minecraft plugins/
+cd plugin
+mvn clean package
+# Copy target/mc_plugin-1.0-SNAPSHOT.jar to Minecraft plugins/
 ```
 
 ---
 
 ## Version
 
-**v0.1-semantic-scene-engine**
+**v1.0 — drift-v1** · [GitHub Release](https://github.com/Zxy876/drift-system-classic/releases/tag/drift-v1)
 
-Initial release of the DriftSystem semantic scene generation engine.
+Initial production release of DriftSystem / 心悦宇宙.
+- Plugin: [drift-plugin-classic](https://github.com/Zxy876/drift-plugin-classic)
+- Backend: [drift-backend-classic](https://github.com/Zxy876/drift-backend-classic)
 
 ---
 
