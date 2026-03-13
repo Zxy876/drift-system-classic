@@ -846,6 +846,7 @@ def build_scene_events(
     *,
     player_id: str,
     scene_theme: str,
+    theme_override: str | None = None,
     scene_hint: str | None,
     text: str,
     anchor: str | None,
@@ -879,7 +880,10 @@ def build_scene_events(
         scene_hint=scene_hint,
         anchor_position=anchor_position,
         selection_context=selection_context,
+        theme_override=theme_override,
     )
+
+    effective_scene_theme = str(assembled_scene.get("story_theme") or scene_theme or "").strip() or str(scene_theme or "").strip()
 
     scene_plan = dict(assembled_scene.get("scene_plan") or {})
     base_fragments = list(scene_plan.get("fragments") or [])
@@ -928,7 +932,9 @@ def build_scene_events(
         normalized_patch_mode = "full"
 
     return {
-        "scene_theme": scene_theme,
+        "scene_theme": effective_scene_theme,
+        "requested_scene_theme": scene_theme,
+        "theme_override": str(theme_override or "").strip() or None,
         "scene_hint": scene_hint,
         "level_id": str(level_id or "runtime"),
         "selected_anchor": selected_anchor,
@@ -1068,6 +1074,8 @@ def _scene_meta_payload(scene_output: dict) -> dict:
 
     return {
         "scene_theme": scene_output.get("scene_theme"),
+        "requested_scene_theme": scene_output.get("requested_scene_theme"),
+        "theme_override": scene_output.get("theme_override"),
         "scene_hint": scene_output.get("scene_hint"),
         "selected_anchor": scene_output.get("selected_anchor"),
         "initial_anchor": scene_output.get("initial_anchor") or scene_output.get("selected_anchor"),
@@ -3232,6 +3240,11 @@ def api_story_advance(player_id: str, payload: Dict[str, Any]):
 # ============================================================
 @router.get("/state/{player_id}")
 def api_story_state(player_id: str):
+    return {"status": "ok", "state": story_engine.get_public_state(player_id)}
+
+
+@router.post("/state/{player_id}")
+def api_story_state_post(player_id: str):
     return {"status": "ok", "state": story_engine.get_public_state(player_id)}
 
 

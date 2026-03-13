@@ -1,17 +1,41 @@
-[
-  { "type": "chat", "text": "/taskdebug", "delayMs": 3000 },
-  { "type": "chat", "text": "/predictscene", "delayMs": 3000 },
-  { "type": "chat", "text": "/explainscene", "delayMs": 3000 },
-  { "type": "chat", "text": "/questlog", "delayMs": 2500 },
-  { "type": "chat", "text": "/recommend", "delayMs": 2500 },
-  { "type": "chat", "text": "/spawnfragment", "delayMs": 3000 },
-  { "type": "chat", "text": "/debugscene", "delayMs": 3000 },
-  { "type": "chat", "text": "/debuginventory", "delayMs": 3000 },
-  { "type": "chat", "text": "/eventdebug", "delayMs": 3000 },
-  { "type": "chat", "text": "/storyreset", "delayMs": 3000 },
-  { "type": "chat", "text": "/taskdebug", "delayMs": 3000 },
-  { "type": "chat", "text": "创建剧情 雨夜灯塔 在海边", "delayMs": 4000 },
-  { "type": "chat", "text": "我想继续", "delayMs": 3500 },
-  { "type": "chat", "text": "我靠近了向导", "delayMs": 3500 },
-  { "type": "chat", "text": "/debugpatch", "delayMs": 3500 }
-]
+{
+  "name": "god_view_audit_strict_join",
+  "failOnUnknownCommand": true,
+  "actions": [
+    {
+      "type": "chat",
+      "text": "/heartmenu",
+      "delayMs": 2500,
+      "expectAny": ["心悦宇宙", "菜单"],
+      "rejectAny": ["Unknown command"]
+    },
+    {
+      "type": "chat",
+      "text": "/levels",
+      "delayMs": 2500,
+      "expectAny": ["心悦宇宙", "levels"],
+      "rejectAny": ["Unknown command"]
+    },
+    {
+      "type": "chat",
+      "text": "/level flagship_01",
+      "delayMs": 5000,
+      "expectAny": ["正在为", "加载关卡"],
+      "rejectAny": ["Unknown command"]
+    },
+    {
+      "type": "chat",
+      "text": "/drift status",
+      "delayMs": 3000,
+      "expectAny": ["你的状态", "当前关卡"],
+      "rejectAny": ["Unknown command"]
+    },
+    {
+      "type": "chat",
+      "text": "你好，我想继续冒险",
+      "delayMs": 3500,
+      "expectAny": ["你：", "继续当前教学提示"],
+      "rejectAny": ["Unknown command"]
+    }
+  ]
+}

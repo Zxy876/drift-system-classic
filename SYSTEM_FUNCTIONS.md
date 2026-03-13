@@ -29,7 +29,7 @@
 | 命令 | 插件实现 | 后端接口 | 后端处理模块 | 世界执行与反馈 |
 |---|---|---|---|---|
 | `/drift status` | `DriftCommand` | 无 | 本地 `StoryManager` 缓存 | 聊天输出状态 |
-| `/drift sync` | `DriftCommand -> StoryManager.syncState` | `POST /story/state/{player}` | `story_api.api_story_state`（接口定义为 GET） | 仅同步本地关卡缓存 |
+| `/drift sync` | `DriftCommand -> StoryManager.syncState` | `POST /story/state/{player}` | `story_api.api_story_state_post`（与 GET 同步返回） | 仅同步本地关卡缓存 |
 | `/drift report` | `DriftCommand` | `GET /world/story/{player}/debug/tasks` | `world_api.story_debug_tasks` | 聊天输出 apply report |
 | `/drift tutorial start` | `TutorialManager.startTutorial` | `POST /tutorial/start/{player}` | `tutorial_api.start_tutorial` | 教学 BossBar + 指令引导 |
 | `/drift tutorial hint` | `TutorialManager.getHint` | `POST /tutorial/hint/{player}` | `tutorial_api.get_tutorial_hint` | 提示文本回显 |
@@ -153,7 +153,7 @@
 ## 7. Known Gaps / Risks
 
 - `plugin/plugin.yml` 为旧版子集，运行时应以 `plugin/src/main/resources/plugin.yml` 为准。
-- `/drift sync` 当前调用 `POST /story/state/{player}`，而后端接口定义为 `GET /story/state/{player}`，存在协议不一致风险。
+- `/drift sync` 与后端 `POST /story/state/{player}` 已对齐；仍需在回归测试中覆盖 GET/POST 双动词兼容性。
 - 插件同时保留新旧双意图链：聊天主链走 `IntentRouter2`，NPC 临近仍可触发旧 `IntentRouter`，可能导致路径行为差异。
 - `DRIFT_TASK_DEBUG_TOKEN` 启用后，`taskdebug/predictscene/explainscene` 需带 token 才可访问。
 

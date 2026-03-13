@@ -30,12 +30,14 @@ PHASE_24_COMPLETE = true
 PHASE_25_COMPLETE = true
 PHASE_26_COMPLETE = true
 PHASE_27_COMPLETE = true
+PHASE_28_COMPLETE = true
 
 ## 2. Current Goal
-- Await Phase 28 charter to continue flagship campaign polish now that tutorial completion, exit scene, and post-tutorial progression are live.
+- Stabilize post-Phase 28 runtime with regression checks and operator-facing observability for story/task flows.
 
 ## 3. Progress – Done
 - Capabilities already achieved:
+	- Phase 28 closed protocol and runtime debt: `POST /story/state/{player}` now matches plugin `syncState`, Phase 1.5 TODO stubs were replaced with accurate Phase 2 path docs, `get_exit_readiness` now returns `exit_phrases + completed_milestones`, and repository licensing is now explicit with a root MIT `LICENSE`.
 	- Phase 27 tutorial completion tracker now emits the `tutorial_complete` milestone, applies the JSON `tutorial_exit_patch`, and the plugin session manager switches players into NORMAL mode with `/level` rerouted once the tutorial is cleared.
 	- Phase 26 restored plugin-side NPC interaction listeners so right-clicking featured NPCs emits canonical quest_events with cooldown feedback, unblocking tutorial and flagship beats end-to-end.
 	- Phase 25 self-healing diagnostics log orphan rule_events with context-aware suggestions; QuestRuntime exposes orphan history and StoryEngine stores SequenceMatcher-ranked auto-heal hints, documented in `docs/TASK_AUTOFIX.md` and covered by `backend/test_task_autofix.py`.
@@ -117,11 +119,15 @@ PHASE_27_COMPLETE = true
 - Root-level shell scripts (e.g., `build_and_deploy.sh`, `test_all.sh`) for building, testing, and deployment workflows
 
 ## 7. Next Actions (task-based, GPT readable)
+- [ ] Run full regression sweep for `/drift sync`, `/world/story/rule-event`, and exit intent flow against latest backend routes.
 - [ ] QA NPC interaction loop: tutorial → flagship checkpoints, confirming quest_event progression without relying on free-text chat fallbacks.
 - [x] QA Face-path 主线：Tutorial → 03 → 08 → 12 → finale，验证晨光结局的摄像机与情绪补丁平滑衔接。
 - [ ] Review orphan rule_event telemetry on staging and adjust SequenceMatcher thresholds if confidence skews low/high.
 - [ ] Pair with plugin team on presenting auto-heal hints to operators without mutating live milestone state.
 - [ ] Capture orphan frequency vs milestone completion metrics for upcoming live-ops dashboards.
+- [ ] Add backend test coverage for `get_exit_readiness` payload fields (`exit_phrases`, `completed_milestones`) to prevent regression.
+- [ ] 下一期：落地 LLM 意图翻译器（置信度门控 + 严格 schema 校验 + rule-based fallback）。
+- [ ] 下一期：落地对话式澄清（clarify/confirm 流程）并把确认结果回写 scene_hints。
 - [ ] QA Escape-path 主线：确认夜行循环结局保持灯光/音乐同步，并正确记录 `xinyue.campaign_complete`。
 
 ## 8. Risks

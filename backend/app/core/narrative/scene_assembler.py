@@ -117,9 +117,12 @@ def assemble_scene(
     scene_hint: str | None = None,
     anchor_position: Dict[str, Any] | None = None,
     selection_context: Dict[str, Any] | None = None,
+    theme_override: str | None = None,
 ) -> Dict[str, Any]:
     normalized_inventory = _normalize_inventory_state(inventory_state)
-    normalized_theme = str(story_theme or "")
+    requested_theme = str(story_theme or "")
+    normalized_theme_override = str(theme_override or "").strip() or None
+    normalized_theme = normalized_theme_override or requested_theme
     normalized_hint = _normalize_scene_hint(scene_hint)
 
     selection = select_fragments_with_debug(
@@ -158,6 +161,8 @@ def assemble_scene(
     return {
         "inventory_state": normalized_inventory,
         "story_theme": normalized_theme,
+        "requested_story_theme": requested_theme,
+        "theme_override": normalized_theme_override,
         "scene_hint": normalized_hint,
         "scene_plan": {
             "template_version": TEMPLATE_VERSION,

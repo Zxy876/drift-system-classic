@@ -34,6 +34,28 @@ def _normalize_token_list(raw_value: Any) -> List[str]:
     return rows
 
 
+def _normalize_scene_hints(raw_value: Any) -> Dict[str, Any]:
+    payload = dict(raw_value) if isinstance(raw_value, dict) else {}
+    if not payload:
+        return {}
+
+    preferred = _normalize_token_list(payload.get("preferred_semantics"))
+    required = _normalize_token_list(payload.get("required_semantics"))
+    fallback_root = _normalize_token(payload.get("fallback_root"))
+    theme_override = _normalize_token(payload.get("theme_override"))
+
+    result: Dict[str, Any] = {}
+    if preferred:
+        result["preferred_semantics"] = preferred
+    if required:
+        result["required_semantics"] = required
+    if fallback_root:
+        result["fallback_root"] = fallback_root
+    if theme_override:
+        result["theme_override"] = theme_override
+    return result
+
+
 def _safe_int(value: Any, default: int = 0) -> int:
     try:
         return int(float(value))
@@ -267,6 +289,7 @@ def choose_transition(
                 "score": score,
                 "matched_axes": matched_axes,
                 "score_details": score_details,
+                "scene_hints": _normalize_scene_hints(raw_candidate.get("scene_hints")),
             }
         )
 
@@ -323,6 +346,7 @@ def choose_transition(
         "observed_signals": sorted(all_signals),
         "selected_assets": _normalize_token_list((scene_generation or {}).get("selected_assets")),
         "theme_filter": dict((scene_generation or {}).get("theme_filter") or {}),
+        "scene_hints": _normalize_scene_hints(state_payload.get("scene_hints")),
     }
 
     chosen_transition = _normalize_token((selected_row or {}).get("transition_id"))
@@ -349,6 +373,7 @@ def choose_transition(
     updated_state.setdefault("current_arc", str(state_payload.get("current_arc") or "main"))
     updated_state.setdefault("unlocked_nodes", _normalize_token_list(state_payload.get("unlocked_nodes")))
     updated_state.setdefault("completed_nodes", _normalize_token_list(state_payload.get("completed_nodes")))
+    updated_state["scene_hints"] = _normalize_scene_hints(state_payload.get("scene_hints"))
     updated_state["blocked_by"] = list(decision_payload.get("blocked_by") or [])
 
     if chosen_transition and target_node:
@@ -363,6 +388,7 @@ def choose_transition(
             unlocked_nodes.append(target_node)
         updated_state["unlocked_nodes"] = unlocked_nodes
         updated_state["current_node"] = target_node
+        updated_state["scene_hints"] = _normalize_scene_hints((selected_row or {}).get("scene_hints"))
 
         entry = NarrativeTransitionLogEntry(
             player_id=normalized_player,
@@ -392,6 +418,7 @@ def choose_transition(
                 "priority": _safe_int(row.get("priority"), 0),
                 "satisfied": bool(row.get("satisfied")),
                 "blocked_by": _normalize_token_list(row.get("blocked_by")),
+                "scene_hints": _normalize_scene_hints(row.get("scene_hints")),
             }
             for row in candidate_rows
         ],

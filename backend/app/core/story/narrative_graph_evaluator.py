@@ -41,12 +41,35 @@ def _safe_dict(raw_value: Any) -> Dict[str, Any]:
     return dict(raw_value) if isinstance(raw_value, dict) else {}
 
 
+def _normalize_scene_hints(raw_value: Any) -> Dict[str, Any]:
+    payload = _safe_dict(raw_value)
+    if not payload:
+        return {}
+
+    preferred = _normalize_token_list(payload.get("preferred_semantics"))
+    required = _normalize_token_list(payload.get("required_semantics"))
+    fallback_root = _normalize_token(payload.get("fallback_root"))
+    theme_override = _normalize_token(payload.get("theme_override"))
+
+    scene_hints: Dict[str, Any] = {}
+    if preferred:
+        scene_hints["preferred_semantics"] = list(preferred)
+    if required:
+        scene_hints["required_semantics"] = list(required)
+    if fallback_root:
+        scene_hints["fallback_root"] = fallback_root
+    if theme_override:
+        scene_hints["theme_override"] = theme_override
+    return scene_hints
+
+
 @dataclass(frozen=True)
 class NarrativeNodeRule:
     node: str
     arc: str
     next_nodes: List[str]
     requires: List[str]
+    scene_hints: Dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -64,18 +87,44 @@ def _default_graph_payload() -> Dict[str, Any]:
         "nodes": {
             "forest_intro": {
                 "arc": "main",
-                "next": ["camp_life"],
+                "next": ["camp_life", "ancient_temple"],
                 "requires": ["scene:camp"],
+                "scene_hints": {
+                    "preferred_semantics": ["camp", "warm"],
+                    "fallback_root": "camp",
+                    "theme_override": "camp",
+                },
             },
             "camp_life": {
                 "arc": "main",
                 "next": ["village_arrival"],
                 "requires": ["scene:village"],
+                "scene_hints": {
+                    "preferred_semantics": ["village", "trade"],
+                    "fallback_root": "village",
+                    "theme_override": "village",
+                },
+            },
+            "ancient_temple": {
+                "arc": "main",
+                "next": ["village_arrival"],
+                "requires": ["collect:wood", "collect:rune"],
+                "scene_hints": {
+                    "preferred_semantics": ["temple", "ancient", "stone"],
+                    "required_semantics": ["temple"],
+                    "fallback_root": "shrine",
+                    "theme_override": "knowledge_temple",
+                },
             },
             "village_arrival": {
                 "arc": "main",
                 "next": [],
                 "requires": ["scene:forge"],
+                "scene_hints": {
+                    "preferred_semantics": ["forge", "village"],
+                    "fallback_root": "forge",
+                    "theme_override": "forge",
+                },
             },
         },
     }
@@ -111,6 +160,7 @@ def _normalize_graph(raw_graph: Any) -> NarrativeGraphConfig:
         arc = _normalize_token(rule_map.get("arc")) or "main"
         next_nodes = _normalize_token_list(rule_map.get("next"))
         requires = _normalize_token_list(rule_map.get("requires"))
+        scene_hints = _normalize_scene_hints(rule_map.get("scene_hints"))
 
         node_order.append(node_id)
         nodes[node_id] = NarrativeNodeRule(
@@ -118,6 +168,7 @@ def _normalize_graph(raw_graph: Any) -> NarrativeGraphConfig:
             arc=arc,
             next_nodes=next_nodes,
             requires=requires,
+            scene_hints=scene_hints,
         )
 
     if not nodes:
@@ -141,6 +192,19 @@ def _normalize_graph(raw_graph: Any) -> NarrativeGraphConfig:
 def load_narrative_graph() -> NarrativeGraphConfig:
     raw = _load_json(NARRATIVE_GRAPH_FILE)
     return _normalize_graph(raw)
+
+
+def scene_hints_for_node(node_id: str | None, *, graph: NarrativeGraphConfig | None = None) -> Dict[str, Any]:
+    normalized = _normalize_token(node_id)
+    if not normalized:
+        return {}
+
+    target_graph = graph if isinstance(graph, NarrativeGraphConfig) else load_narrative_graph()
+    rule = target_graph.nodes.get(normalized)
+    if not isinstance(rule, NarrativeNodeRule):
+        return {}
+
+    return _normalize_scene_hints(rule.scene_hints)
 
 
 def _event_type_from_row(row: Dict[str, Any]) -> str:
@@ -256,6 +320,8 @@ def evaluate_narrative_state(
         current_node = graph.entry_node
         current_rule = graph.nodes.get(current_node)
 
+    current_scene_hints = scene_hints_for_node(current_node, graph=graph)
+
     transition_candidates: List[NarrativeTransitionCandidate] = []
     blocked_union: List[str] = []
 
@@ -273,6 +339,7 @@ def evaluate_narrative_state(
                 requires=list(candidate_rule.requires),
                 blocked_by=list(blocked_by),
                 satisfied=satisfied,
+                scene_hints=dict(candidate_rule.scene_hints),
             )
         )
 
@@ -290,6 +357,7 @@ def evaluate_narrative_state(
         transition_candidates=transition_candidates,
         blocked_by=blocked_union,
         observed_signals=sorted(signals),
+        scene_hints=current_scene_hints,
     )
 
     return state.to_dict()

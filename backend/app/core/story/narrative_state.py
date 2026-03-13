@@ -11,18 +11,57 @@ def _normalize_token(value: Any) -> str:
     return token.replace("-", "_").replace(" ", "_").strip("_")
 
 
+def _normalize_scene_hints(raw_value: Any) -> Dict[str, Any]:
+    if not isinstance(raw_value, dict):
+        return {}
+
+    preferred: List[str] = []
+    seen_preferred: set[str] = set()
+    for item in raw_value.get("preferred_semantics") if isinstance(raw_value.get("preferred_semantics"), list) else []:
+        token = _normalize_token(item)
+        if not token or token in seen_preferred:
+            continue
+        seen_preferred.add(token)
+        preferred.append(token)
+
+    required: List[str] = []
+    seen_required: set[str] = set()
+    for item in raw_value.get("required_semantics") if isinstance(raw_value.get("required_semantics"), list) else []:
+        token = _normalize_token(item)
+        if not token or token in seen_required:
+            continue
+        seen_required.add(token)
+        required.append(token)
+
+    fallback_root = _normalize_token(raw_value.get("fallback_root"))
+    theme_override = _normalize_token(raw_value.get("theme_override"))
+
+    hints: Dict[str, Any] = {}
+    if preferred:
+        hints["preferred_semantics"] = list(preferred)
+    if required:
+        hints["required_semantics"] = list(required)
+    if fallback_root:
+        hints["fallback_root"] = fallback_root
+    if theme_override:
+        hints["theme_override"] = theme_override
+    return hints
+
+
 @dataclass
 class NarrativeTransitionCandidate:
     node: str
     requires: List[str] = field(default_factory=list)
     blocked_by: List[str] = field(default_factory=list)
     satisfied: bool = False
+    scene_hints: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.node = _normalize_token(self.node)
         self.requires = [_normalize_token(item) for item in self.requires if _normalize_token(item)]
         self.blocked_by = [_normalize_token(item) for item in self.blocked_by if _normalize_token(item)]
         self.satisfied = bool(self.satisfied)
+        self.scene_hints = _normalize_scene_hints(self.scene_hints)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -30,6 +69,7 @@ class NarrativeTransitionCandidate:
             "requires": list(self.requires),
             "blocked_by": list(self.blocked_by),
             "satisfied": bool(self.satisfied),
+            "scene_hints": dict(self.scene_hints),
         }
 
 
@@ -44,6 +84,7 @@ class NarrativeState:
     transition_candidates: List[NarrativeTransitionCandidate] = field(default_factory=list)
     blocked_by: List[str] = field(default_factory=list)
     observed_signals: List[str] = field(default_factory=list)
+    scene_hints: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.version = str(self.version or "narrative_state_v1").strip() or "narrative_state_v1"
@@ -59,6 +100,7 @@ class NarrativeState:
             for item in self.observed_signals
             if _normalize_token(item)
         })
+        self.scene_hints = _normalize_scene_hints(self.scene_hints)
 
         normalized_candidates: List[NarrativeTransitionCandidate] = []
         for candidate in self.transition_candidates:
@@ -72,6 +114,7 @@ class NarrativeState:
                         requires=list(candidate.get("requires") or []),
                         blocked_by=list(candidate.get("blocked_by") or []),
                         satisfied=bool(candidate.get("satisfied")),
+                        scene_hints=dict(candidate.get("scene_hints") or {}),
                     )
                 )
         self.transition_candidates = normalized_candidates
@@ -87,4 +130,5 @@ class NarrativeState:
             "transition_candidates": [candidate.to_dict() for candidate in self.transition_candidates],
             "blocked_by": list(self.blocked_by),
             "observed_signals": list(self.observed_signals),
+            "scene_hints": dict(self.scene_hints),
         }

@@ -91,6 +91,38 @@ def _normalize_token_list(values: Any) -> List[str]:
     return normalized
 
 
+def _normalize_scene_hints(raw_value: Any) -> Dict[str, Any]:
+    payload = dict(raw_value) if isinstance(raw_value, dict) else {}
+    if not payload:
+        return {}
+
+    preferred = _normalize_token_list(payload.get("preferred_semantics"))
+    required = _normalize_token_list(payload.get("required_semantics"))
+    fallback_root = _normalize_token(payload.get("fallback_root"))
+    theme_override = _normalize_token(payload.get("theme_override"))
+
+    normalized: Dict[str, Any] = {}
+    if preferred:
+        normalized["preferred_semantics"] = list(preferred)
+    if required:
+        normalized["required_semantics"] = list(required)
+    if fallback_root:
+        normalized["fallback_root"] = fallback_root
+    if theme_override:
+        normalized["theme_override"] = theme_override
+    return normalized
+
+
+def _scene_hints_from_scene_generation(scene_generation: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    payload = scene_generation if isinstance(scene_generation, dict) else {}
+    direct = _normalize_scene_hints(payload.get("scene_hints"))
+    if direct:
+        return direct
+
+    narrative_state = payload.get("narrative_state") if isinstance(payload.get("narrative_state"), dict) else {}
+    return _normalize_scene_hints(narrative_state.get("scene_hints"))
+
+
 def _first_nonempty_env(*names: str) -> Optional[str]:
     for name in names:
         raw = os.environ.get(name)
@@ -403,7 +435,13 @@ def _scene_theme_override_from_prediction(
     if current_theme and current_theme != default_theme:
         return None
 
+    hints_theme_override = _normalize_token(prediction.get("scene_hints_theme_override"))
+    if hints_theme_override and hints_theme_override != default_theme:
+        return hints_theme_override
+
     semantic_theme = _normalize_token(prediction.get("semantic"))
+    if semantic_theme in {"narrative_fallback", "theme_fallback", "global_fallback"}:
+        semantic_theme = ""
     if semantic_theme and semantic_theme != default_theme:
         return semantic_theme
 
@@ -603,19 +641,33 @@ def _predict_scene_payload_for_player(
 
     story_theme = ""
     scene_hint = None
+    narrative_state: Optional[Dict[str, Any]] = None
+    scene_hints: Dict[str, Any] = {}
     if isinstance(scene_generation, dict):
         if isinstance(scene_generation.get("scene_theme"), str):
             story_theme = str(scene_generation.get("scene_theme") or "").strip()
         if isinstance(scene_generation.get("scene_hint"), str):
             scene_hint = str(scene_generation.get("scene_hint") or "").strip() or None
+        if isinstance(scene_generation.get("narrative_state"), dict):
+            narrative_state = dict(scene_generation.get("narrative_state") or {})
+        scene_hints = _scene_hints_from_scene_generation(scene_generation)
 
-    text_semantic = infer_semantic_from_text(scene_hint) if scene_hint else None
+    text_semantic = None
+    if scene_hint or scene_hints:
+        text_semantic = infer_semantic_from_text(
+            scene_hint,
+            narrative_state=narrative_state,
+            scene_hints=scene_hints if scene_hints else None,
+            current_theme=story_theme or _default_scene_theme_token(),
+        )
     text_semantic_scores: Dict[str, int] = {}
     text_semantic_resolution: List[Dict[str, Any]] = []
     text_semantic_tag: Optional[str] = None
     text_semantic_root: Optional[str] = None
     text_semantic_score = 0
     text_semantic_keyword: Optional[str] = None
+    text_semantic_reason: Optional[str] = None
+    text_fallback_source: Optional[str] = None
     semantic_confidence_threshold = _scene_semantic_confidence_threshold()
 
     if isinstance(text_semantic, dict):
@@ -632,6 +684,11 @@ def _predict_scene_payload_for_player(
         text_semantic_tag = _normalize_token(text_semantic.get("semantic"))
         text_semantic_root = _normalize_token(text_semantic.get("predicted_root") or text_semantic.get("root"))
         text_semantic_score = max(0, _safe_int(text_semantic.get("score"), 0))
+        text_fallback_source = _normalize_token(text_semantic.get("fallback_source")) or None
+
+        raw_reason = str(text_semantic.get("reason") or "").strip()
+        if raw_reason:
+            text_semantic_reason = raw_reason
 
         raw_keywords = text_semantic.get("matched_keywords") if isinstance(text_semantic.get("matched_keywords"), list) else []
         for keyword in raw_keywords:
@@ -642,16 +699,29 @@ def _predict_scene_payload_for_player(
 
     semantic_confidence = _clamp01(float(text_semantic_score) / _scene_semantic_score_scale())
     allow_text_semantic = semantic_confidence >= semantic_confidence_threshold
+    allow_fallback_hint = text_fallback_source in {"narrative", "theme", "global"}
+
+    effective_scene_hint = scene_hint
+    if allow_fallback_hint and text_semantic_root:
+        effective_scene_hint = text_semantic_root
+
+    preferred_semantics = _normalize_token_list(scene_hints.get("preferred_semantics")) if scene_hints else []
+    required_semantics = _normalize_token_list(scene_hints.get("required_semantics")) if scene_hints else []
 
     resources_for_selection: Dict[str, int] = dict(resources)
     if allow_text_semantic:
         for token, amount in text_semantic_scores.items():
             resources_for_selection[token] = int(resources_for_selection.get(token, 0)) + max(0, int(amount))
+    for token in preferred_semantics:
+        resources_for_selection[token] = int(resources_for_selection.get(token, 0)) + 1
+    if text_fallback_source == "narrative":
+        for token in required_semantics:
+            resources_for_selection[token] = max(int(resources_for_selection.get(token, 0)), 1)
 
     selection = select_fragments_with_debug(
         resources_for_selection,
         story_theme,
-        scene_hint=scene_hint,
+        scene_hint=effective_scene_hint,
         selection_context=selection_context if selection_context else None,
     )
     debug = selection.get("debug") if isinstance(selection.get("debug"), dict) else {}
@@ -672,10 +742,13 @@ def _predict_scene_payload_for_player(
     semantic_resolution = debug.get("semantic_resolution") if isinstance(debug.get("semantic_resolution"), list) else []
     normalized_semantic_resolution = [dict(row) for row in semantic_resolution if isinstance(row, dict)]
     if text_semantic_tag or text_semantic_scores:
+        semantic_row_source = "talk_text_v3"
+        if text_fallback_source:
+            semantic_row_source = f"text_{text_fallback_source}_v3"
         text_resolution_row: Dict[str, Any] = {
             "item": "$talk_text",
             "semantic_tags": list(sorted(text_semantic_scores.keys())) if text_semantic_scores else ([text_semantic_tag] if text_semantic_tag else []),
-            "source": "talk_text_v3",
+            "source": semantic_row_source,
             "adapter_hit": False,
         }
         if text_semantic_keyword:
@@ -684,24 +757,32 @@ def _predict_scene_payload_for_player(
             text_resolution_row["score"] = text_semantic_score
         if text_semantic_resolution:
             text_resolution_row["details"] = list(text_semantic_resolution)
+        if text_semantic_reason:
+            text_resolution_row["reason"] = text_semantic_reason
         normalized_semantic_resolution.append(text_resolution_row)
 
     predicted_root = _normalize_token(debug.get("selected_root"))
     if not predicted_root and normalized_scores:
         predicted_root = _normalize_token(normalized_scores[0].get("fragment"))
-    if not predicted_root and allow_text_semantic and text_semantic_root:
+    if not predicted_root and text_semantic_root and (allow_text_semantic or allow_fallback_hint):
         predicted_root = text_semantic_root
 
-    if not normalized_scores and predicted_root and allow_text_semantic:
+    if not normalized_scores and predicted_root and (allow_text_semantic or allow_fallback_hint):
         fallback_reason = "text semantic fallback"
         if text_semantic_tag:
             fallback_reason = f"text semantic: {text_semantic_tag}"
+        if text_semantic_reason:
+            fallback_reason = text_semantic_reason
+
+        candidate_source = "talk_text_v3"
+        if text_fallback_source:
+            candidate_source = f"text_{text_fallback_source}_v3"
         normalized_scores = [
             {
                 "fragment": predicted_root,
                 "score": 0.0,
                 "reason": fallback_reason,
-                "source": "talk_text_v3",
+                "source": candidate_source,
                 "hint_only": True,
             }
         ]
@@ -714,10 +795,13 @@ def _predict_scene_payload_for_player(
     has_verified_candidates = bool(verified_scores)
 
     predicted_root_value = predicted_root if has_verified_candidates else None
+    predicted_root_hint_value = predicted_root or None
+    if text_fallback_source == "narrative" and text_semantic_root:
+        predicted_root_hint_value = text_semantic_root
 
     prediction: Dict[str, Any] = {
         "predicted_root": predicted_root_value,
-        "predicted_root_hint": predicted_root or None,
+        "predicted_root_hint": predicted_root_hint_value,
         "candidate_scores": normalized_scores,
         "semantic_scores": dict(normalized_semantic_scores),
         "semantic_resolution": list(normalized_semantic_resolution),
@@ -725,14 +809,21 @@ def _predict_scene_payload_for_player(
         "has_verified_candidates": has_verified_candidates,
         "semantic_confidence": round(semantic_confidence, 3),
         "semantic_confidence_threshold": semantic_confidence_threshold,
-        "semantic_trigger_allowed": allow_text_semantic,
+        "semantic_trigger_allowed": bool(allow_text_semantic or allow_fallback_hint),
         "score_threshold": _scene_score_threshold(),
         "max_scene_candidates": max_scene_candidates,
+        "scene_hints": dict(scene_hints),
+        "scene_hints_theme_override": _normalize_token(scene_hints.get("theme_override")) if scene_hints else None,
     }
 
+    if effective_scene_hint and effective_scene_hint != scene_hint:
+        prediction["effective_scene_hint"] = effective_scene_hint
+
     top_reason = _top_reason_from_candidate_scores(normalized_scores)
-    if (not top_reason) and text_semantic_tag and allow_text_semantic:
+    if (not top_reason) and text_semantic_tag and (allow_text_semantic or allow_fallback_hint):
         top_reason = f"text semantic: {text_semantic_tag}"
+    if (not top_reason) and text_semantic_reason:
+        top_reason = text_semantic_reason
     if top_reason:
         prediction["top_reason"] = top_reason
 
@@ -742,6 +833,10 @@ def _predict_scene_payload_for_player(
         prediction["semantic_score"] = text_semantic_score
     if text_semantic_keyword:
         prediction["semantic_keyword"] = text_semantic_keyword
+    if text_fallback_source:
+        prediction["semantic_fallback_source"] = text_fallback_source
+    if text_semantic_reason:
+        prediction["semantic_reason"] = text_semantic_reason
     if text_semantic_scores:
         prediction["all_scores"] = dict(text_semantic_scores)
 
@@ -1297,6 +1392,7 @@ def _narrative_state_for_player(
             "transition_candidates": [],
             "blocked_by": [],
             "observed_signals": [],
+            "scene_hints": {},
             "level_id": fallback_current_level,
             "player_id": player_id,
         }
@@ -1310,11 +1406,13 @@ def _narrative_fields_payload(narrative_state: Dict[str, Any]) -> Dict[str, Any]
     candidates = state.get("transition_candidates") if isinstance(state.get("transition_candidates"), list) else []
     blocked_by = state.get("blocked_by") if isinstance(state.get("blocked_by"), list) else []
     last_decision = state.get("last_decision") if isinstance(state.get("last_decision"), dict) else {}
+    scene_hints = _normalize_scene_hints(state.get("scene_hints"))
     return {
         "narrative_state": state,
         "current_node": state.get("current_node"),
         "transition_candidates": list(candidates),
         "blocked_by": list(blocked_by),
+        "scene_hints": dict(scene_hints),
         "last_decision": dict(last_decision),
         "narrative_decision": dict(last_decision),
     }
@@ -2145,6 +2243,20 @@ def story_narrative_choose(player_id: str, payload: Optional[NarrativeChooseRequ
     updated_scene_generation = dict(scene_generation)
     updated_scene_generation["narrative_state"] = dict(updated_narrative_state)
     updated_scene_generation["last_decision"] = dict(decision_payload)
+
+    resolved_scene_hints = _normalize_scene_hints(updated_narrative_state.get("scene_hints"))
+    if resolved_scene_hints:
+        updated_scene_generation["scene_hints"] = dict(resolved_scene_hints)
+
+        hints_theme_override = _normalize_token(resolved_scene_hints.get("theme_override"))
+        if hints_theme_override:
+            updated_scene_generation["scene_theme"] = hints_theme_override
+
+        hints_fallback_root = _normalize_token(resolved_scene_hints.get("fallback_root"))
+        existing_hint = str(updated_scene_generation.get("scene_hint") or "").strip()
+        if hints_fallback_root and not existing_hint:
+            updated_scene_generation["scene_hint"] = hints_fallback_root
+
     _update_scene_generation_for_player(normalized_player, updated_scene_generation)
 
     logger.info(
@@ -2182,8 +2294,10 @@ def story_spawn_fragment(player_id: str, payload: Optional[SpawnFragmentRequest]
 
     request_payload = payload or SpawnFragmentRequest()
     explicit_scene_theme = isinstance(request_payload.scene_theme, str) and bool(request_payload.scene_theme.strip())
+    explicit_scene_hint = isinstance(request_payload.scene_hint, str) and bool(request_payload.scene_hint.strip())
     scene_generation = _scene_generation_for_player(normalized_player) or {}
     auto_bootstrap = None
+    scene_hints = _scene_hints_from_scene_generation(scene_generation)
 
     if not scene_generation:
         prediction = _predict_scene_payload_for_player(normalized_player, scene_generation=None)
@@ -2200,19 +2314,38 @@ def story_spawn_fragment(player_id: str, payload: Optional[SpawnFragmentRequest]
         requested_theme = os.environ.get("DRIFT_DEFAULT_SCENE_THEME", "camp")
     scene_theme = str(requested_theme or "camp").strip() or "camp"
 
+    hints_theme_override = _normalize_token(scene_hints.get("theme_override")) if scene_hints else ""
+    if hints_theme_override and not explicit_scene_theme:
+        scene_theme = hints_theme_override
+    theme_override_for_scene = hints_theme_override or None
+
     requested_hint = request_payload.scene_hint
     if not isinstance(requested_hint, str) or not requested_hint.strip():
         requested_hint = scene_generation.get("scene_hint")
     scene_hint = str(requested_hint).strip() if isinstance(requested_hint, str) and requested_hint.strip() else None
 
+    hints_fallback_root = _normalize_token(scene_hints.get("fallback_root")) if scene_hints else ""
+    if hints_fallback_root and not explicit_scene_hint and not scene_hint:
+        scene_hint = hints_fallback_root
+
     if not explicit_scene_theme:
-        prediction_for_theme = _predict_scene_payload_for_player(normalized_player, scene_generation=scene_generation)
+        prediction_scene_generation = dict(scene_generation)
+        prediction_scene_generation["scene_theme"] = scene_theme
+        if scene_hint:
+            prediction_scene_generation["scene_hint"] = scene_hint
+        prediction_for_theme = _predict_scene_payload_for_player(normalized_player, scene_generation=prediction_scene_generation)
         theme_override = _scene_theme_override_from_prediction(prediction_for_theme, current_scene_theme=scene_theme)
         if isinstance(theme_override, str) and theme_override.strip():
             scene_theme = theme_override
             if isinstance(scene_generation, dict):
                 scene_generation = dict(scene_generation)
                 scene_generation["scene_theme"] = scene_theme
+
+        if not explicit_scene_hint and not scene_hint:
+            semantic_fallback_source = _normalize_token(prediction_for_theme.get("semantic_fallback_source"))
+            predicted_root_hint = _normalize_token(prediction_for_theme.get("predicted_root_hint"))
+            if semantic_fallback_source in {"narrative", "theme", "global"} and predicted_root_hint:
+                scene_hint = predicted_root_hint
 
     anchor = request_payload.anchor
     if isinstance(anchor, str) and anchor.strip():
@@ -2249,6 +2382,7 @@ def story_spawn_fragment(player_id: str, payload: Optional[SpawnFragmentRequest]
     scene_output = build_scene_events(
         player_id=normalized_player,
         scene_theme=scene_theme,
+        theme_override=theme_override_for_scene,
         scene_hint=scene_hint,
         text=request_text,
         anchor=anchor,
@@ -2264,6 +2398,7 @@ def story_spawn_fragment(player_id: str, payload: Optional[SpawnFragmentRequest]
         scene_output = build_scene_events(
             player_id=normalized_player,
             scene_theme=scene_theme,
+            theme_override=theme_override_for_scene,
             scene_hint=scene_hint,
             text=request_text,
             anchor=anchor,
@@ -2288,6 +2423,7 @@ def story_spawn_fragment(player_id: str, payload: Optional[SpawnFragmentRequest]
             scene_output = build_scene_events(
                 player_id=normalized_player,
                 scene_theme=scene_theme,
+                theme_override=theme_override_for_scene,
                 scene_hint=scene_hint,
                 text=request_text,
                 anchor=anchor,
@@ -2307,6 +2443,22 @@ def story_spawn_fragment(player_id: str, payload: Optional[SpawnFragmentRequest]
         updated_scene_generation = dict(scene_generation)
         updated_scene_generation.update(_scene_meta_payload(scene_output))
         _update_scene_generation_for_player(normalized_player, updated_scene_generation)
+
+    response_scene_theme = scene_theme
+    response_requested_scene_theme = scene_theme
+    response_theme_override = theme_override_for_scene
+    if isinstance(scene_output, dict):
+        output_scene_theme = str(scene_output.get("scene_theme") or "").strip()
+        if output_scene_theme:
+            response_scene_theme = output_scene_theme
+
+        output_requested_scene_theme = str(scene_output.get("requested_scene_theme") or "").strip()
+        if output_requested_scene_theme:
+            response_requested_scene_theme = output_requested_scene_theme
+
+        output_theme_override = str(scene_output.get("theme_override") or "").strip()
+        if output_theme_override:
+            response_theme_override = output_theme_override
 
     world_patch = scene_patch if isinstance(scene_patch, dict) else {}
     has_patch = bool(world_patch)
@@ -2331,7 +2483,9 @@ def story_spawn_fragment(player_id: str, payload: Optional[SpawnFragmentRequest]
         "status": "ok",
         "msg": "Scene fragment generated." if has_patch else "blocked: missing seed resources",
         "player_id": normalized_player,
-        "scene_theme": scene_theme,
+        "scene_theme": response_scene_theme,
+        "requested_scene_theme": response_requested_scene_theme,
+        "theme_override": response_theme_override,
         "scene_hint": scene_hint,
         "fragment_count": len(fragments),
         "event_count": len(event_plan),
