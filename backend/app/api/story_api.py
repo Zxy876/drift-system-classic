@@ -854,6 +854,7 @@ def build_scene_events(
     patch_mode: str = "full",
     rule_events: Optional[List[Dict[str, Any]]] = None,
     selection_context: Optional[Dict[str, Any]] = None,
+    inventory_state_override: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from app.core.narrative import SceneState, assemble_scene, evolve_scene_state
 
@@ -863,7 +864,14 @@ def build_scene_events(
         player_id=player_id,
         player_position=player_position,
     )
-    inventory_state = _scene_inventory_state_from_event_log(str(player_id or "default"))
+    if isinstance(inventory_state_override, dict):
+        inventory_state = {
+            "player_id": str(inventory_state_override.get("player_id") or player_id or "default"),
+            "resources": dict(inventory_state_override.get("resources") or {}),
+            "updated_at_ms": _safe_int(inventory_state_override.get("updated_at_ms"), int(time.time() * 1000)),
+        }
+    else:
+        inventory_state = _scene_inventory_state_from_event_log(str(player_id or "default"))
 
     assembled_scene = assemble_scene(
         inventory_state,

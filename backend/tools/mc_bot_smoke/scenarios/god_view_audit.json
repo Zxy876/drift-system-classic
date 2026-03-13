@@ -1,0 +1,17 @@
+[
+  { "type": "chat", "text": "/taskdebug", "delayMs": 3000 },
+  { "type": "chat", "text": "/predictscene", "delayMs": 3000 },
+  { "type": "chat", "text": "/explainscene", "delayMs": 3000 },
+  { "type": "chat", "text": "/questlog", "delayMs": 2500 },
+  { "type": "chat", "text": "/recommend", "delayMs": 2500 },
+  { "type": "chat", "text": "/spawnfragment", "delayMs": 3000 },
+  { "type": "chat", "text": "/debugscene", "delayMs": 3000 },
+  { "type": "chat", "text": "/debuginventory", "delayMs": 3000 },
+  { "type": "chat", "text": "/eventdebug", "delayMs": 3000 },
+  { "type": "chat", "text": "/storyreset", "delayMs": 3000 },
+  { "type": "chat", "text": "/taskdebug", "delayMs": 3000 },
+  { "type": "chat", "text": "创建剧情 雨夜灯塔 在海边", "delayMs": 4000 },
+  { "type": "chat", "text": "我想继续", "delayMs": 3500 },
+  { "type": "chat", "text": "我靠近了向导", "delayMs": 3500 },
+  { "type": "chat", "text": "/debugpatch", "delayMs": 3500 }
+]

@@ -111,9 +111,10 @@ def _candidate_filenames(level_id: str) -> List[str]:
 
     lowered = base.lower()
 
-
-    if lowered in TUTORIAL_ALIASES:
+    if lowered == TUTORIAL_CANONICAL_ID or lowered in TUTORIAL_ALIASES:
         candidates.append(f"{TUTORIAL_CANONICAL_ID}.json")
+        # Backward compatibility: tutorial content may still live in flagship_01.json.
+        candidates.append("flagship_01.json")
 
     if base.startswith("flagship_"):
         candidates.append(f"{base}.json")
@@ -204,6 +205,9 @@ def _load_level_file(path: str, file_id: str, requested_id: str) -> Level:
     tree = data.get("tree")
 
     level_identifier = data.get("id") or file_id or requested_id
+    requested_base = (requested_id or "").replace(".json", "").lower()
+    if requested_base == TUTORIAL_CANONICAL_ID or requested_base in TUTORIAL_ALIASES:
+        level_identifier = TUTORIAL_CANONICAL_ID
 
     level = Level(
         level_id=level_identifier,

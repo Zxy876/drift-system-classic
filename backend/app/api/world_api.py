@@ -30,6 +30,18 @@ REPORT_STATUS_RANK: Dict[str, int] = {
 apply_reports_by_player: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(dict)
 fallback_state_by_player: Dict[str, Dict[str, Any]] = defaultdict(dict)
 semantic_bootstrap_state_by_player: Dict[str, Dict[str, Any]] = defaultdict(dict)
+auto_bootstrap_last_trigger_ms_by_player: Dict[str, int] = {}
+
+SCENE_POLICY_DEFAULTS: Dict[str, Any] = {
+    "score_threshold": 0.55,
+    "auto_bootstrap_threshold": 0.65,
+    "semantic_confidence_threshold": 0.60,
+    "max_scene_candidates": 5,
+    "require_seed_resources": True,
+    "fallback_policy": "hint_only",
+    "auto_bootstrap_cooldown": 10,
+    "semantic_score_scale": 10.0,
+}
 
 
 def _now_ms() -> int:
@@ -77,6 +89,80 @@ def _normalize_token_list(values: Any) -> List[str]:
         seen.add(token)
         normalized.append(token)
     return normalized
+
+
+def _first_nonempty_env(*names: str) -> Optional[str]:
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if text:
+            return text
+    return None
+
+
+def _clamp01(value: float) -> float:
+    return min(1.0, max(0.0, float(value)))
+
+
+def _scene_score_threshold() -> float:
+    raw = _first_nonempty_env("DRIFT_SCENE_SCORE_THRESHOLD", "SCENE_SCORE_THRESHOLD")
+    default = float(SCENE_POLICY_DEFAULTS["score_threshold"])
+    return _clamp01(_safe_float(raw, default))
+
+
+def _scene_auto_bootstrap_threshold() -> float:
+    raw = _first_nonempty_env(
+        "DRIFT_SCENE_AUTO_BOOTSTRAP_SCORE_THRESHOLD",
+        "SCENE_AUTO_BOOTSTRAP_THRESHOLD",
+    )
+    default = float(SCENE_POLICY_DEFAULTS["auto_bootstrap_threshold"])
+    return _clamp01(_safe_float(raw, default))
+
+
+def _scene_semantic_confidence_threshold() -> float:
+    raw = _first_nonempty_env("DRIFT_SCENE_SEMANTIC_CONFIDENCE_THRESHOLD", "SCENE_SEMANTIC_CONFIDENCE_THRESHOLD")
+    default = float(SCENE_POLICY_DEFAULTS["semantic_confidence_threshold"])
+    return _clamp01(_safe_float(raw, default))
+
+
+def _scene_semantic_score_scale() -> float:
+    raw = _first_nonempty_env("DRIFT_SCENE_SEMANTIC_SCORE_SCALE", "SCENE_SEMANTIC_SCORE_SCALE")
+    default = float(SCENE_POLICY_DEFAULTS["semantic_score_scale"])
+    return max(1.0, _safe_float(raw, default))
+
+
+def _scene_max_candidates() -> int:
+    raw = _first_nonempty_env("DRIFT_SCENE_MAX_CANDIDATES", "SCENE_MAX_CANDIDATES")
+    default = int(SCENE_POLICY_DEFAULTS["max_scene_candidates"])
+    return max(1, _safe_int(raw, default))
+
+
+def _scene_require_seed_resources() -> bool:
+    raw = _first_nonempty_env("DRIFT_SCENE_REQUIRE_SEED_RESOURCES", "SCENE_REQUIRE_SEED_RESOURCES")
+    if raw is None:
+        return bool(SCENE_POLICY_DEFAULTS["require_seed_resources"])
+    token = str(raw).strip().lower()
+    if token in {"1", "true", "yes", "on"}:
+        return True
+    if token in {"0", "false", "no", "off"}:
+        return False
+    return bool(SCENE_POLICY_DEFAULTS["require_seed_resources"])
+
+
+def _scene_fallback_policy() -> str:
+    raw = _first_nonempty_env("DRIFT_SCENE_FALLBACK_POLICY", "SCENE_FALLBACK_POLICY")
+    token = str(raw or SCENE_POLICY_DEFAULTS["fallback_policy"]).strip().lower()
+    if token not in {"hint_only", "legacy_seed_retry"}:
+        return "hint_only"
+    return token
+
+
+def _scene_auto_bootstrap_cooldown_seconds() -> int:
+    raw = _first_nonempty_env("DRIFT_SCENE_AUTO_BOOTSTRAP_COOLDOWN", "SCENE_AUTO_BOOTSTRAP_COOLDOWN")
+    default = int(SCENE_POLICY_DEFAULTS["auto_bootstrap_cooldown"])
+    return max(0, _safe_int(raw, default))
 
 
 def _interaction_type_from_rule_event(event_type: str) -> str:
@@ -363,6 +449,7 @@ def _bootstrap_scene_generation_for_talk_event(
         prediction = _predict_scene_payload_for_player(normalized_player, scene_generation=updated_generation)
 
     updated_generation["selected_root"] = prediction.get("predicted_root")
+    updated_generation["predicted_root_hint"] = prediction.get("predicted_root_hint")
     updated_generation["candidate_scores"] = list(prediction.get("candidate_scores") or [])
     updated_generation["semantic_scores"] = dict(prediction.get("semantic_scores") or {})
     updated_generation["semantic_resolution"] = list(prediction.get("semantic_resolution") or [])
@@ -374,7 +461,9 @@ def _bootstrap_scene_generation_for_talk_event(
         "scene_theme": scene_theme,
         "scene_theme_override": theme_override,
         "predicted_root": prediction.get("predicted_root"),
-        "candidate_count": len(updated_generation.get("candidate_scores") or []),
+        "predicted_root_hint": prediction.get("predicted_root_hint"),
+        "candidate_count": len(_verified_candidate_scores(updated_generation.get("candidate_scores"))),
+        "has_verified_candidates": bool(prediction.get("has_verified_candidates")),
     }
 
 
@@ -461,6 +550,49 @@ def _top_reason_from_candidate_scores(candidate_scores: List[Dict[str, Any]]) ->
     return None
 
 
+def _is_verified_scene_candidate(candidate: Dict[str, Any]) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+
+    fragment = _normalize_token(candidate.get("fragment"))
+    if not fragment:
+        return False
+
+    source = _normalize_token(candidate.get("source"))
+    # `talk_text_v3` rows are semantic hints synthesized from free text,
+    # not real scene-library candidates that can be executed safely.
+    if source == "talk_text_v3":
+        return False
+
+    score = max(0.0, _safe_float(candidate.get("score"), 0.0))
+    if score < _scene_score_threshold():
+        return False
+
+    return True
+
+
+def _verified_candidate_scores(candidate_scores: Any) -> List[Dict[str, Any]]:
+    if not isinstance(candidate_scores, list):
+        return []
+
+    rows = [dict(row) for row in candidate_scores if isinstance(row, dict) and _is_verified_scene_candidate(row)]
+    rows.sort(key=lambda row: (-_safe_float(row.get("score"), 0.0), str(row.get("fragment") or "")))
+    return rows[: _scene_max_candidates()]
+
+
+def _prediction_has_verified_candidates(prediction: Dict[str, Any]) -> bool:
+    if not isinstance(prediction, dict):
+        return False
+    return bool(_verified_candidate_scores(prediction.get("candidate_scores")))
+
+
+def _first_verified_candidate_from_prediction(prediction: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    rows = _verified_candidate_scores(prediction.get("candidate_scores") if isinstance(prediction, dict) else None)
+    if not rows:
+        return None
+    return rows[0]
+
+
 def _predict_scene_payload_for_player(
     player_id: str,
     *,
@@ -484,6 +616,7 @@ def _predict_scene_payload_for_player(
     text_semantic_root: Optional[str] = None
     text_semantic_score = 0
     text_semantic_keyword: Optional[str] = None
+    semantic_confidence_threshold = _scene_semantic_confidence_threshold()
 
     if isinstance(text_semantic, dict):
         raw_scores = text_semantic.get("all_scores") if isinstance(text_semantic.get("all_scores"), dict) else {}
@@ -507,9 +640,13 @@ def _predict_scene_payload_for_player(
                 text_semantic_keyword = keyword_text
                 break
 
+    semantic_confidence = _clamp01(float(text_semantic_score) / _scene_semantic_score_scale())
+    allow_text_semantic = semantic_confidence >= semantic_confidence_threshold
+
     resources_for_selection: Dict[str, int] = dict(resources)
-    for token, amount in text_semantic_scores.items():
-        resources_for_selection[token] = int(resources_for_selection.get(token, 0)) + max(0, int(amount))
+    if allow_text_semantic:
+        for token, amount in text_semantic_scores.items():
+            resources_for_selection[token] = int(resources_for_selection.get(token, 0)) + max(0, int(amount))
 
     selection = select_fragments_with_debug(
         resources_for_selection,
@@ -528,8 +665,9 @@ def _predict_scene_payload_for_player(
         amount = _safe_int(value, 0)
         if token and amount > 0:
             normalized_semantic_scores[token] = amount
-    for token, amount in text_semantic_scores.items():
-        normalized_semantic_scores[token] = max(_safe_int(normalized_semantic_scores.get(token), 0), int(amount))
+    if allow_text_semantic:
+        for token, amount in text_semantic_scores.items():
+            normalized_semantic_scores[token] = max(_safe_int(normalized_semantic_scores.get(token), 0), int(amount))
 
     semantic_resolution = debug.get("semantic_resolution") if isinstance(debug.get("semantic_resolution"), list) else []
     normalized_semantic_resolution = [dict(row) for row in semantic_resolution if isinstance(row, dict)]
@@ -551,33 +689,49 @@ def _predict_scene_payload_for_player(
     predicted_root = _normalize_token(debug.get("selected_root"))
     if not predicted_root and normalized_scores:
         predicted_root = _normalize_token(normalized_scores[0].get("fragment"))
-    if not predicted_root and text_semantic_root:
+    if not predicted_root and allow_text_semantic and text_semantic_root:
         predicted_root = text_semantic_root
 
-    if not normalized_scores and predicted_root:
-        fallback_score = float(max(1, text_semantic_score)) if text_semantic_score > 0 else 1.0
+    if not normalized_scores and predicted_root and allow_text_semantic:
         fallback_reason = "text semantic fallback"
         if text_semantic_tag:
             fallback_reason = f"text semantic: {text_semantic_tag}"
         normalized_scores = [
             {
                 "fragment": predicted_root,
-                "score": fallback_score,
+                "score": 0.0,
                 "reason": fallback_reason,
                 "source": "talk_text_v3",
+                "hint_only": True,
             }
         ]
 
+    max_scene_candidates = _scene_max_candidates()
+    if normalized_scores:
+        normalized_scores = list(normalized_scores)[:max_scene_candidates]
+
+    verified_scores = _verified_candidate_scores(normalized_scores)
+    has_verified_candidates = bool(verified_scores)
+
+    predicted_root_value = predicted_root if has_verified_candidates else None
+
     prediction: Dict[str, Any] = {
-        "predicted_root": predicted_root or None,
+        "predicted_root": predicted_root_value,
+        "predicted_root_hint": predicted_root or None,
         "candidate_scores": normalized_scores,
         "semantic_scores": dict(normalized_semantic_scores),
         "semantic_resolution": list(normalized_semantic_resolution),
         "inventory_resources": dict(resources),
+        "has_verified_candidates": has_verified_candidates,
+        "semantic_confidence": round(semantic_confidence, 3),
+        "semantic_confidence_threshold": semantic_confidence_threshold,
+        "semantic_trigger_allowed": allow_text_semantic,
+        "score_threshold": _scene_score_threshold(),
+        "max_scene_candidates": max_scene_candidates,
     }
 
     top_reason = _top_reason_from_candidate_scores(normalized_scores)
-    if (not top_reason) and text_semantic_tag:
+    if (not top_reason) and text_semantic_tag and allow_text_semantic:
         top_reason = f"text semantic: {text_semantic_tag}"
     if top_reason:
         prediction["top_reason"] = top_reason
@@ -611,12 +765,27 @@ def _top_semantic_signal_from_prediction(prediction: Dict[str, Any]) -> tuple[Op
 
 
 def _top_candidate_score_from_prediction(prediction: Dict[str, Any]) -> float:
-    candidate_scores = prediction.get("candidate_scores") if isinstance(prediction.get("candidate_scores"), list) else []
-    if not candidate_scores:
+    first = _first_verified_candidate_from_prediction(prediction)
+    if not isinstance(first, dict):
+        return 0.0
+    return max(0.0, _safe_float(first.get("score"), 0.0))
+
+
+def _semantic_confidence_from_prediction(prediction: Dict[str, Any]) -> float:
+    if not isinstance(prediction, dict):
         return 0.0
 
-    first = candidate_scores[0] if isinstance(candidate_scores[0], dict) else {}
-    return max(0.0, _safe_float(first.get("score"), 0.0))
+    explicit = prediction.get("semantic_confidence")
+    if explicit is not None:
+        return _clamp01(_safe_float(explicit, 0.0))
+
+    semantic_score = max(0.0, _safe_float(prediction.get("semantic_score"), 0.0))
+    if semantic_score <= 0.0:
+        semantic_scores = prediction.get("semantic_scores") if isinstance(prediction.get("semantic_scores"), dict) else {}
+        if semantic_scores:
+            semantic_score = max(max(0.0, _safe_float(value, 0.0)) for value in semantic_scores.values())
+
+    return _clamp01(semantic_score / _scene_semantic_score_scale())
 
 
 def _auto_bootstrap_scene_generation_for_player(
@@ -627,16 +796,32 @@ def _auto_bootstrap_scene_generation_for_player(
         return {}, None
 
     predicted_root = _normalize_token(prediction.get("predicted_root"))
+    predicted_root_hint = _normalize_token(prediction.get("predicted_root_hint"))
     candidate_scores = prediction.get("candidate_scores") if isinstance(prediction.get("candidate_scores"), list) else []
-    if not predicted_root and candidate_scores:
-        first = candidate_scores[0] if isinstance(candidate_scores[0], dict) else {}
-        predicted_root = _normalize_token(first.get("fragment"))
+    first_verified_candidate = _first_verified_candidate_from_prediction(prediction)
+    if not predicted_root and isinstance(first_verified_candidate, dict):
+        predicted_root = _normalize_token(first_verified_candidate.get("fragment"))
+    has_verified_candidates = bool(first_verified_candidate)
 
     top_semantic, semantic_score = _top_semantic_signal_from_prediction(prediction)
+    semantic_confidence = _semantic_confidence_from_prediction(prediction)
     top_candidate_score = _top_candidate_score_from_prediction(prediction)
 
-    activation_threshold = max(1, _safe_int(os.environ.get("DRIFT_SCENE_AUTO_BOOTSTRAP_THRESHOLD"), 5))
-    candidate_threshold = max(0.0, _safe_float(os.environ.get("DRIFT_SCENE_AUTO_BOOTSTRAP_SCORE_THRESHOLD"), 0.0))
+    semantic_confidence_threshold = _scene_semantic_confidence_threshold()
+    candidate_threshold = _scene_auto_bootstrap_threshold()
+    require_seed_resources = _scene_require_seed_resources()
+    cooldown_seconds = _scene_auto_bootstrap_cooldown_seconds()
+    cooldown_ms = max(0, cooldown_seconds) * 1000
+    now_ms = _now_ms()
+    normalized_player_id = str(player_id or "").strip()
+    last_trigger_ms = _safe_int(auto_bootstrap_last_trigger_ms_by_player.get(normalized_player_id), 0)
+    cooldown_remaining_ms = 0
+    cooldown_ready = True
+    if cooldown_ms > 0 and last_trigger_ms > 0:
+        elapsed_ms = max(0, now_ms - last_trigger_ms)
+        if elapsed_ms < cooldown_ms:
+            cooldown_ready = False
+            cooldown_remaining_ms = cooldown_ms - elapsed_ms
 
     inventory_raw = prediction.get("inventory_resources") if isinstance(prediction.get("inventory_resources"), dict) else {}
     inventory_resources: Dict[str, int] = {}
@@ -648,8 +833,12 @@ def _auto_bootstrap_scene_generation_for_player(
             inventory_resources[token] = amount
             resource_total += amount
 
-    should_bootstrap = bool(predicted_root) and semantic_score >= activation_threshold
-    should_bootstrap = should_bootstrap and top_candidate_score >= candidate_threshold and resource_total > 0
+    should_bootstrap = has_verified_candidates and bool(predicted_root)
+    should_bootstrap = should_bootstrap and semantic_confidence >= semantic_confidence_threshold
+    should_bootstrap = should_bootstrap and top_candidate_score >= candidate_threshold
+    if require_seed_resources:
+        should_bootstrap = should_bootstrap and resource_total > 0
+    should_bootstrap = should_bootstrap and cooldown_ready
 
     if not should_bootstrap:
         return {}, None
@@ -671,11 +860,20 @@ def _auto_bootstrap_scene_generation_for_player(
     bootstrap_meta = {
         "triggered": True,
         "predicted_root": predicted_root,
+        "predicted_root_hint": predicted_root_hint or None,
+        "has_verified_candidates": has_verified_candidates,
         "semantic": top_semantic,
         "semantic_score": semantic_score,
+        "semantic_confidence": round(semantic_confidence, 3),
         "candidate_score": top_candidate_score,
-        "threshold": activation_threshold,
+        "semantic_confidence_threshold": semantic_confidence_threshold,
         "candidate_threshold": candidate_threshold,
+        "score_threshold": _scene_score_threshold(),
+        "max_scene_candidates": _scene_max_candidates(),
+        "require_seed_resources": require_seed_resources,
+        "fallback_policy": _scene_fallback_policy(),
+        "cooldown_seconds": cooldown_seconds,
+        "cooldown_remaining_ms": cooldown_remaining_ms,
         "resource_total": resource_total,
         "source": "semantic_auto_bootstrap",
     }
@@ -704,6 +902,8 @@ def _auto_bootstrap_scene_generation_for_player(
             "timestamp_ms": _now_ms(),
         },
     }
+
+    auto_bootstrap_last_trigger_ms_by_player[normalized_player_id] = now_ms
 
     persisted = _update_scene_generation_for_player(player_id, scene_generation)
     bootstrap_meta["story_state_created"] = bool(persisted)
@@ -738,15 +938,18 @@ def _scene_selected_root(
         if selected:
             return selected
 
-    if isinstance(prediction, dict):
+    if isinstance(prediction, dict) and _prediction_has_verified_candidates(prediction):
         selected = _normalize_token(prediction.get("predicted_root"))
         if selected:
             return selected
 
     if candidate_scores:
-        selected = _normalize_token(candidate_scores[0].get("fragment"))
-        if selected:
-            return selected
+        for row in candidate_scores:
+            if not _is_verified_scene_candidate(row):
+                continue
+            selected = _normalize_token(row.get("fragment"))
+            if selected:
+                return selected
 
     return None
 
@@ -762,12 +965,13 @@ def _scene_reason_text(
         if selected_reason:
             return selected_reason
 
-    if isinstance(prediction, dict):
+    if isinstance(prediction, dict) and _prediction_has_verified_candidates(prediction):
         top_reason = str(prediction.get("top_reason") or "").strip()
         if top_reason:
             return top_reason
 
-    return _top_reason_from_candidate_scores(candidate_scores)
+    verified_scores = _verified_candidate_scores(candidate_scores)
+    return _top_reason_from_candidate_scores(verified_scores)
 
 
 def _semantic_scores_payload(
@@ -2019,9 +2223,28 @@ def story_spawn_fragment(player_id: str, payload: Optional[SpawnFragmentRequest]
     player_position = request_payload.player_position if isinstance(request_payload.player_position, dict) else None
     request_text = scene_hint or f"spawn fragment {scene_theme}"
 
-    from app.api.story_api import build_scene_events, _scene_event_plan_to_world_patch, _scene_meta_payload, _selection_context_from_scene_generation
+    from app.api.story_api import (
+        build_scene_events,
+        _scene_event_plan_to_world_patch,
+        _scene_inventory_state_from_event_log,
+        _scene_meta_payload,
+        _selection_context_from_scene_generation,
+    )
 
     selection_context = _selection_context_from_scene_generation(scene_generation)
+    default_scene_theme = str(os.environ.get("DRIFT_DEFAULT_SCENE_THEME", "camp") or "camp").strip() or "camp"
+    fallback_policy = _scene_fallback_policy()
+    require_seed_resources = _scene_require_seed_resources()
+    allow_seed_resource_retry = fallback_policy == "legacy_seed_retry" and not require_seed_resources
+    fallback_applied = False
+    fallback_reason: Optional[str] = None
+    fallback_seed_resources: Dict[str, int] = {}
+
+    def _scene_counts(output: Dict[str, Any]) -> tuple[Dict[str, Any], List[Dict[str, Any]], List[str]]:
+        plan = output.get("scene_plan") if isinstance(output.get("scene_plan"), dict) else {}
+        events = output.get("event_plan") if isinstance(output.get("event_plan"), list) else []
+        rows = plan.get("fragments") if isinstance(plan.get("fragments"), list) else []
+        return plan, events, rows
 
     scene_output = build_scene_events(
         player_id=normalized_player,
@@ -2033,15 +2256,57 @@ def story_spawn_fragment(player_id: str, payload: Optional[SpawnFragmentRequest]
         selection_context=selection_context if selection_context else None,
     )
     scene_patch = _scene_event_plan_to_world_patch(scene_output)
+    scene_plan, event_plan, fragments = _scene_counts(scene_output)
+
+    if not fragments and not explicit_scene_theme and scene_theme != default_scene_theme:
+        scene_theme = default_scene_theme
+        request_text = scene_hint or f"spawn fragment {scene_theme}"
+        scene_output = build_scene_events(
+            player_id=normalized_player,
+            scene_theme=scene_theme,
+            scene_hint=scene_hint,
+            text=request_text,
+            anchor=anchor,
+            player_position=player_position,
+            selection_context=selection_context if selection_context else None,
+        )
+        scene_patch = _scene_event_plan_to_world_patch(scene_output)
+        scene_plan, event_plan, fragments = _scene_counts(scene_output)
+        fallback_applied = True
+        fallback_reason = "default_theme"
+
+    if not fragments and allow_seed_resource_retry:
+        fallback_inventory_state = _scene_inventory_state_from_event_log(normalized_player)
+        fallback_resources = dict(fallback_inventory_state.get("resources") or {}) if isinstance(fallback_inventory_state, dict) else {}
+        if not fallback_resources:
+            fallback_seed_resources = {"wood": 1}
+            fallback_inventory_state = {
+                "player_id": normalized_player,
+                "resources": dict(fallback_seed_resources),
+                "updated_at_ms": _now_ms(),
+            }
+            scene_output = build_scene_events(
+                player_id=normalized_player,
+                scene_theme=scene_theme,
+                scene_hint=scene_hint,
+                text=request_text,
+                anchor=anchor,
+                player_position=player_position,
+                selection_context=selection_context if selection_context else None,
+                inventory_state_override=fallback_inventory_state,
+            )
+            scene_patch = _scene_event_plan_to_world_patch(scene_output)
+            scene_plan, event_plan, fragments = _scene_counts(scene_output)
+            fallback_applied = True
+            if fallback_reason is None:
+                fallback_reason = "seed_resources"
+    elif not fragments and fallback_reason is None:
+        fallback_reason = "hint_only"
 
     if isinstance(scene_output, dict):
         updated_scene_generation = dict(scene_generation)
         updated_scene_generation.update(_scene_meta_payload(scene_output))
         _update_scene_generation_for_player(normalized_player, updated_scene_generation)
-
-    scene_plan = scene_output.get("scene_plan") if isinstance(scene_output.get("scene_plan"), dict) else {}
-    event_plan = scene_output.get("event_plan") if isinstance(scene_output.get("event_plan"), list) else []
-    fragments = scene_plan.get("fragments") if isinstance(scene_plan.get("fragments"), list) else []
 
     world_patch = scene_patch if isinstance(scene_patch, dict) else {}
     has_patch = bool(world_patch)
@@ -2055,12 +2320,16 @@ def story_spawn_fragment(player_id: str, payload: Optional[SpawnFragmentRequest]
             "event_count": len(event_plan),
             "has_world_patch": has_patch,
             "auto_bootstrap": bool(auto_bootstrap and auto_bootstrap.get("triggered")),
+            "fallback_applied": fallback_applied,
+            "fallback_reason": fallback_reason,
+            "fallback_policy": fallback_policy,
+            "require_seed_resources": require_seed_resources,
         },
     )
 
     return {
         "status": "ok",
-        "msg": "Scene fragment generated." if has_patch else "Scene fragment generated (no executable patch).",
+        "msg": "Scene fragment generated." if has_patch else "blocked: missing seed resources",
         "player_id": normalized_player,
         "scene_theme": scene_theme,
         "scene_hint": scene_hint,
@@ -2069,6 +2338,13 @@ def story_spawn_fragment(player_id: str, payload: Optional[SpawnFragmentRequest]
         "scene": scene_output,
         "world_patch": world_patch,
         "auto_bootstrap": auto_bootstrap,
+        "fallback": {
+            "applied": fallback_applied,
+            "reason": fallback_reason,
+            "seed_resources": dict(fallback_seed_resources),
+            "policy": fallback_policy,
+            "require_seed_resources": require_seed_resources,
+        },
     }
 
 
@@ -2102,6 +2378,7 @@ def story_reset(player_id: str, payload: Optional[StoryResetRequest] = None):
     apply_reports_by_player.pop(normalized_player, None)
     fallback_state_by_player.pop(normalized_player, None)
     semantic_bootstrap_state_by_player.pop(normalized_player, None)
+    auto_bootstrap_last_trigger_ms_by_player.pop(normalized_player, None)
 
     logger.info(
         "story_reset",

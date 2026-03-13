@@ -569,7 +569,26 @@ public class TutorialManager {
   }
 
   public boolean ensureUnlocked(Player player, TutorialState required, String message) {
-    return stateMachine.ensureUnlocked(player, required, message);
+    boolean unlocked = stateMachine.ensureUnlocked(player, required, message);
+    if (unlocked || player == null || required == null) {
+      return unlocked;
+    }
+
+    if (sessions == null || !sessions.isTutorial(player) || isTutorialFinalized(player)) {
+      return false;
+    }
+
+    TutorialState current = stateMachine.getState(player);
+    if (current == TutorialState.INACTIVE) {
+      plugin.getLogger().log(Level.INFO,
+          "[TutorialGate] Auto-start tutorial for {0} (required={1})",
+          new Object[] { player.getName(), required });
+      stateMachine.start(player);
+      startTutorial(player);
+      player.sendMessage("§e检测到教学尚未开始，已自动为你启动教程。");
+    }
+
+    return false;
   }
 
   public boolean ensureUnlocked(Player player, TutorialState required) {
