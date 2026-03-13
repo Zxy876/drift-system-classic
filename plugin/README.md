@@ -152,7 +152,7 @@ DriftSystem是一个**完全自然语言驱动的AI冒险游戏系统**，让玩
 ### config.yml
 ```yaml
 # 后端地址
-backend_url: "http://127.0.0.1:8000"
+backend_url: "https://drift-backend-classic-production.up.railway.app"
 
 # 系统设置
 system:

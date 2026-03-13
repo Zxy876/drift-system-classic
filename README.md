@@ -130,7 +130,7 @@ drift-system/
 ## Hosted Backend
 
 ```
-https://drift-backend-production.up.railway.app
+https://drift-backend-classic-production.up.railway.app
 ```
 
 DriftSystem uses a hosted backend. Install the plugin and start the server. No backend setup required.
@@ -144,7 +144,7 @@ DriftSystem uses a hosted backend. Install the plugin and start the server. No b
 ### Plugin (Hosted Backend — No Setup Required)
 1. Download `drift-plugin.jar` from the [v1 Release](https://github.com/Zxy876/drift-system-classic/releases/tag/drift-v1)
 2. Drop into your server's `plugins/` folder
-3. Start the server — connects to `https://drift-backend-production.up.railway.app` automatically
+3. Start the server — connects to `https://drift-backend-classic-production.up.railway.app` automatically
 
 ### Backend Setup (Self-hosted / Development)
 ```bash
