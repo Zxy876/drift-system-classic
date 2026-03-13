@@ -338,9 +338,10 @@ class StoryEngine:
     def enter_level_with_scene(self, player_id: str, level: Level) -> None:
         """Apply deterministic scene metadata when available.
 
-        TODO: integrate with SceneOrchestrator to emit world patches and handle
-        cleanup. For now we retain the handle on the player state to avoid
-        losing context when future integrations arrive.
+        Scene world patches are generated and merged by ``load_level_for_player``
+        via ``scene_gen.generate_for_level``. This method retains the scene
+        handle on the player state so that ``exit_level_with_cleanup`` can
+        include the scene flag in the cleanup metadata.
         """
 
         scene_cfg = getattr(level, "scene", None)
@@ -356,8 +357,10 @@ class StoryEngine:
     def advance_with_beat(self, player_id: str, beat_id: str) -> None:
         """Move the active beat pointer forward.
 
-        TODO: trigger beat-driven world patches and ensure quest/task syncing
-        once the runtime supports these hooks.
+        The Phase 2 event manager (``_prepare_phase2_state`` → ``_advance_beat``)
+        handles beat-driven world patches and quest/task syncing via
+        ``RuleEventBridge``. This method keeps the ``current_beat`` pointer
+        in sync so external callers can observe the active beat.
         """
 
         player_state = self.players.setdefault(player_id, {})
@@ -366,7 +369,9 @@ class StoryEngine:
     def register_rule_listeners(self, level: Level) -> None:
         """Register rule listeners with the quest runtime.
 
-        TODO: Bridge into the Minecraft plugin once a transport layer exists.
+        The plugin bridge is realised through the ``/world/story/rule-event``
+        API endpoint handled by ``RuleEventBridge`` on the plugin side.
+        Listeners registered here are matched when those events arrive.
         """
 
         rule_cfg = getattr(level, "rules", None)
@@ -377,14 +382,18 @@ class StoryEngine:
             quest_runtime.register_rule_listener(level.level_id, listener)
 
     def inject_tasks(self, player_id: str, level: Level) -> None:
-        """Inject Phase 1.5 task definitions into QuestRuntime."""
+        """Inject Phase 1.5 task definitions into QuestRuntime.
+
+        TaskConfig dataclasses are loaded into QuestRuntime by
+        ``_prepare_phase2_state`` (which calls ``quest_runtime.load_level_tasks``).
+        ``_create_session`` inside QuestRuntime converts dataclasses to dicts
+        automatically, so no manual serialization is needed here.
+        """
 
         tasks = getattr(level, "tasks", [])
         if not tasks:
             return
 
-        # TODO: convert TaskConfig dataclasses into legacy dicts and load them
-        # into QuestRuntime once serialization is finalized.
         player_state = self.players.setdefault(player_id, {})
         player_state["pending_tasks"] = tasks
 
