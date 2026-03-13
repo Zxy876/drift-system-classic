@@ -1197,8 +1197,10 @@ class QuestRuntime:
         if not state:
             return None
 
+        level_id: Optional[str] = state.get("level_id")
+
         if self._all_tasks_completed(state):
-            return {"exit_ready": True}
+            return {"exit_ready": True, "player_id": player_id, "level_id": level_id}
 
         # Incorporate exit phrases and milestones from ExitConfig.
         level = state.get("level")
@@ -1213,6 +1215,8 @@ class QuestRuntime:
 
         return {
             "exit_ready": False,
+            "player_id": player_id,
+            "level_id": level_id,
             "exit_phrases": phrase_aliases,
             "completed_milestones": completed_milestones,
         }

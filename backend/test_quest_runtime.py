@@ -400,5 +400,69 @@ class QuestRuntimeRuleEventTests(unittest.TestCase):
         )
 
 
+class GetExitReadinessTests(unittest.TestCase):
+    """Regression tests for QuestRuntime.get_exit_readiness field contract."""
+
+    def setUp(self):
+        self.player = "exit_readiness_player"
+        self.runtime = QuestRuntime()
+        # Clear any persisted state left by previous runs so tests start fresh.
+        self.runtime.reset_player_state(self.player, clear_persisted=True, clear_inventory=True)
+        npc_engine.active_npcs.clear()
+        npc_engine.rule_bindings.clear()
+        npc_engine.active_rule_refs.clear()
+
+    def tearDown(self):
+        self.runtime.reset_player_state(self.player, clear_persisted=True, clear_inventory=True)
+        npc_engine.active_npcs.clear()
+        npc_engine.rule_bindings.clear()
+        npc_engine.active_rule_refs.clear()
+
+    def _build_level_with_exit(self, phrase_aliases=None):
+        from app.core.story.level_schema import ExitConfig
+
+        level = build_level([])
+        exit_cfg = ExitConfig(phrase_aliases=phrase_aliases or [])
+        setattr(level, "exit", exit_cfg)
+        return level
+
+    def test_returns_none_for_unknown_player(self):
+        result = self.runtime.get_exit_readiness("nonexistent_player")
+        self.assertIsNone(result, "Unknown player should return None")
+
+    def test_includes_player_id_and_level_id_when_not_ready(self):
+        level = self._build_level_with_exit(["再见", "exit"])
+        self.runtime.load_level_tasks(level, self.player)
+
+        result = self.runtime.get_exit_readiness(self.player)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.get("player_id"), self.player, "player_id must be present")
+        self.assertEqual(result.get("level_id"), level.level_id, "level_id must be present")
+        self.assertFalse(result.get("exit_ready"), "Should not be exit_ready with no completed tasks")
+        self.assertIsInstance(result.get("exit_phrases"), list, "exit_phrases must be a list")
+        self.assertIsInstance(result.get("completed_milestones"), list, "completed_milestones must be a list")
+        self.assertIn("再见", result.get("exit_phrases", []), "phrase_aliases should propagate to exit_phrases")
+
+    def test_includes_player_id_and_level_id_when_ready(self):
+        tasks = [
+            {
+                "id": "simple_task",
+                "type": "interact",
+                "target": "npc_a",
+            }
+        ]
+        level = build_level(tasks)
+        self.runtime.load_level_tasks(level, self.player)
+        self.runtime.issue_tasks_on_beat(level, self.player, {"id": "beat_1"})
+        self.runtime.record_event(self.player, {"type": "interact", "target_id": "npc_a"})
+        self.runtime.check_completion(level, self.player)
+
+        result = self.runtime.get_exit_readiness(self.player)
+        self.assertIsNotNone(result)
+        self.assertTrue(result.get("exit_ready"), "exit_ready should be True after all tasks complete")
+        self.assertEqual(result.get("player_id"), self.player, "player_id must be present when exit_ready")
+        self.assertEqual(result.get("level_id"), level.level_id, "level_id must be present when exit_ready")
+
+
 if __name__ == "__main__":
     unittest.main()
