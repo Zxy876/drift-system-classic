@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+pycache/
 *.py[cod]
 *$py.class
 *.so
@@ -13,6 +14,7 @@ env/
 
 # Node
 node_modules/
+.env
 
 # Minecraft/Drift runtime
 world/
@@ -40,6 +42,7 @@ target/
 build/
 *.class
 *.jar
+!releases/drift-plugin-v1.0.jar
 
 # Temporary files
 *.tmp
