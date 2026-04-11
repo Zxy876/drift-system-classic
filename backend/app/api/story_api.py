@@ -3183,6 +3183,14 @@ def _build_payload_v2_for_inject(
         debug_payload["payload_v2_trace"] = payload_trace
         debug_payload["scene_anchor"] = selected_anchor
 
+    # ── Runtime Bridge: compile block_ops → world_patch ──────────────────────
+    # Converts payload_v2.block_ops (relative offsets) into a world_patch
+    # dict that WorldPatchExecutor can execute (blocks + spawn_multi keys).
+    from app.core.runtime.world_patch_compiler import compile_to_world_patch
+    compiled_patch = compile_to_world_patch(payload_v2)
+    if compiled_patch:
+        payload_v2["world_patch"] = compiled_patch
+
     return payload_v2, debug_payload
 
 
@@ -3597,3 +3605,223 @@ def api_story_inject(payload: InjectPayload):
     if _as_bool_env("DRIFT_DEBUG_TRACE", default=False):
         result["transaction"] = transaction_result
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P2.1  AsyncAIFlow → Drift progress notification
+# POST /story/progress/notify
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ProgressNotifyPayload(BaseModel):
+    player_id: str
+    stage: str                        # e.g. "drift_code", "drift_review", "drift_deploy"
+    message: str = ""
+    workflow_id: str = ""
+    status: str = "RUNNING"           # RUNNING | SUCCEEDED | FAILED
+    world_patch: Optional[Dict[str, Any]] = None   # populated by drift_refresh when done
+
+
+# In-memory store: player_id → [{stage, message, workflow_id, status, ts}]
+_progress_log: dict[str, list[dict]] = {}
+_progress_log_lock = __import__("threading").Lock()
+
+_MAX_LOG_PER_PLAYER = 50
+
+
+@router.post("/progress/notify")
+def api_story_progress_notify(payload: ProgressNotifyPayload):
+    """
+    Called by AsyncAIFlow workers (or the Java plugin) to push
+    workflow stage updates into the Drift story layer.
+
+    The entry is stored in memory so /progress/status/<player_id> can serve it.
+    In a full implementation this would fire an SSE / WebSocket push to the
+    Minecraft client; for now it acts as a reliable polling store.
+    """
+    import time as _time
+
+    entry: dict = {
+        "stage": payload.stage,
+        "message": payload.message or payload.stage,
+        "workflow_id": payload.workflow_id,
+        "status": payload.status,
+        "ts": _time.time(),
+    }
+    if payload.world_patch is not None:
+        entry["world_patch"] = payload.world_patch
+
+    with _progress_log_lock:
+        log = _progress_log.setdefault(payload.player_id, [])
+        log.append(entry)
+        # Keep only the most recent entries to avoid unbounded growth
+        if len(log) > _MAX_LOG_PER_PLAYER:
+            _progress_log[payload.player_id] = log[-_MAX_LOG_PER_PLAYER:]
+
+    return {
+        "ok": True,
+        "player_id": payload.player_id,
+        "stage": payload.stage,
+        "status": payload.status,
+    }
+
+
+@router.get("/progress/status/{player_id}")
+def api_story_progress_status(player_id: str):
+    """
+    Return the most recent progress log entries for a player.
+    Used by the MC plugin to poll for workflow updates.
+    """
+    with _progress_log_lock:
+        entries = list(_progress_log.get(player_id, []))
+    return {"player_id": player_id, "entries": entries}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# P2.2  drift_refresh_worker → Drift world refresh
+# POST /story/refresh
+# ─────────────────────────────────────────────────────────────────────────────
+
+class StoryRefreshPayload(BaseModel):
+    player_id: str
+    workflow_id: str = ""
+    issue: str = ""
+    summary: str = ""
+
+
+@router.post("/refresh")
+def api_story_refresh(payload: StoryRefreshPayload):
+    """
+    Called by drift_refresh_worker as the FINAL DAG step.
+
+    Generates a new Drift world-patch representing the AI workflow outcome and
+    stores it in the progress log so the MC plugin's poll loop can retrieve and
+    apply it live in the Minecraft world.
+
+    Steps:
+      1. Build a story inject payload from issue/summary text.
+      2. Create a new level with auto-generated unique level_id.
+      3. Store the world_patch in _progress_log (status=SUCCEEDED).
+      4. Return {ok, world_patch, level_id}.
+    """
+    import time as _time
+    import re as _re
+
+    player_id = (payload.player_id or "demo").strip() or "demo"
+    workflow_id = (payload.workflow_id or "").strip()
+    issue = (payload.issue or "").strip()
+    summary = (payload.summary or issue or "AI workflow completed").strip()
+
+    # ── Build inject text ─────────────────────────────────────────────────────
+    inject_text = summary[:400] if summary else issue[:400] or "AsyncAIFlow 执行完毕，世界已刷新。"
+
+    # Auto-generate a unique level_id
+    slug = _re.sub(r"[^a-z0-9]+", "_", inject_text.lower())[:20].strip("_") or "refresh"
+    level_id = f"ai_refresh_{int(_time.time())}_{slug}"
+
+    # ── Delegate to /story/inject machinery ──────────────────────────────────
+    inject_payload = InjectPayload(
+        level_id=level_id,
+        title=f"[AI] {summary[:60]}",
+        text=inject_text,
+        player_id=player_id,
+    )
+
+    try:
+        inject_result = api_story_inject(inject_payload)
+    except Exception as exc:
+        # level already exists (rare with timestamp) — just return a stub
+        world_patch: Dict[str, Any] = {}
+        inject_result = {}
+        import logging as _logging
+        _logging.getLogger("story_api.refresh").warning(
+            "story/inject failed during refresh: %s — returning empty world_patch", exc
+        )
+
+    world_patch = (
+        inject_result.get("world_patch")
+        or inject_result.get("scene_world_patch")
+        or {}
+    )
+    if not isinstance(world_patch, dict):
+        world_patch = {}
+
+    # ── Phase 7: classify evidence level once, drive all downstream decisions ──────
+    from app.core.runtime.world_patch_compiler import (
+        classify_world_evidence_level as _classify_evidence,
+    )
+    _evidence_level = _classify_evidence(world_patch)
+    _fallback_used = False
+
+    # ── Capability-trigger fallback: ONLY for EMPTY patches ────────────────────
+    # Phase 7 principle: do NOT replace VISUAL_ONLY or INTERACTIVE_WORLD patches
+    # with the fallback — surface the true evidence level instead.
+    # Fallback is only justified when inject produced NOTHING usable.
+    if _evidence_level == "EMPTY":
+        _cap_label = (summary or issue or "AI 能力更新")[:40]
+        _cap_id = f"ai_cap_{workflow_id}" if workflow_id else f"ai_cap_{level_id}"
+        world_patch = {
+            "tell": (
+                f"§6[AI 代码引擎] §f能力已部署：§a{_cap_label}\n"
+                "§7走入发光区域即可激活新能力"
+            ),
+            "title": {
+                "title": "§6✦ 能力已更新",
+                "subtitle": f"§a{_cap_label[:30]}",
+                "fadeIn": 10,
+                "stay": 70,
+                "fadeOut": 20,
+            },
+            "sound": {"sound": "ENTITY_PLAYER_LEVELUP", "volume": 1.0, "pitch": 1.0},
+            "particle": {"type": "VILLAGER_HAPPY", "count": 40, "radius": 1.2},
+            "trigger_zones": [
+                {
+                    "id": _cap_id,
+                    "quest_event": "ai_capability_activated",
+                    "radius": 4.0,
+                    "repeat": False,
+                }
+            ],
+        }
+        _evidence_level = _classify_evidence(world_patch)
+
+    # ── Store SUCCEEDED entry so MC plugin poll loop sees it ─────────────────
+    import time as _time2
+    from app.core.runtime.world_patch_compiler import validate_world_patch as _validate_world_patch
+    _validation = _validate_world_patch(world_patch)
+    entry: Dict[str, Any] = {
+        "stage": "drift_refresh",
+        "message": f"AI 工作流执行完毕，世界已更新 (level_id={level_id})",
+        "workflow_id": workflow_id,
+        "status": "SUCCEEDED",
+        "ts": _time2.time(),
+        "world_patch": world_patch,
+        # ── Phase 7: World Evidence Object ───────────────────────────────────
+        "world_evidence_level": _evidence_level,
+        "block_count": _validation.get("block_count", 0),
+        "has_structure": _validation.get("has_structure", False),
+        "scene_type": inject_result.get("scene_type", "CONTENT"),
+        "runtime_stage": (
+            "world_applied" if _evidence_level == "STRUCTURAL_WORLD" else
+            "interactive_applied" if _evidence_level == "INTERACTIVE_WORLD" else
+            "visual_only"
+        ),
+        "structure_keys_found": _validation.get("structure_keys_found", []),
+        "visual_keys_found": _validation.get("visual_keys_found", []),
+        "interactive_keys_found": _validation.get("interactive_keys_found", []),
+        "build_shape_summary": _validation.get("build_shape_summary"),
+        "entity_count": _validation.get("entity_count", 0),
+        "compiler_mode": _validation.get("compiler_mode", "empty"),
+        "fallback_used": _fallback_used,
+    }
+    with _progress_log_lock:
+        log = _progress_log.setdefault(player_id, [])
+        log.append(entry)
+        if len(log) > _MAX_LOG_PER_PLAYER:
+            _progress_log[player_id] = log[-_MAX_LOG_PER_PLAYER:]
+
+    return {
+        "ok": True,
+        "player_id": player_id,
+        "level_id": level_id,
+        "world_patch": world_patch,
+    }

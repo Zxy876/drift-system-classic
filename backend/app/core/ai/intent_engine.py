@@ -106,8 +106,12 @@ INTENT_PROMPT = """
 3. 若是 CREATE_STORY 且用户文本中出现主题词（例如“创建剧情 大风吹”），请在该 intent 中返回 "scene_theme" 字段。
 4. 若文本包含位置提示（例如“在森林里/在海边”），请同时返回 "scene_hint" 字段。
 5. 涉及关卡数字必须解析成 level_01 / level_05 形式。
-6. 若 AI 不确定，只输出一个 { "type": "SAY_ONLY" }。
-
+6. 若 AI 不确定，只输出一个 { "type": "SAY_ONLY" }。7. 每个 intent 对象必须携带 "difficulty" 整数字段（1-5）：
+   1=纯世界变化（加块/改时间/传送）
+   2=NPC响应或剧情分支
+   3=新场景+多NPC+交互剧情
+   4=场景+剧情+quest系统整合
+   5=完整子系统框架（相当于一个新功能模块）
 严格只允许 JSON。
 """
 
@@ -300,6 +304,33 @@ def ai_parse_multi(text: str) -> Optional[List[Dict[str, Any]]]:
 # ============================================================
 # fallback：返回 list
 # ============================================================
+def _score_difficulty(text: str, intent_type: str) -> int:
+    """Rule-based difficulty scoring for fallback intents."""
+    raw = text.lower()
+    if intent_type in ("SET_DAY", "SET_NIGHT", "SET_WEATHER", "TELEPORT",
+                       "SPAWN_ENTITY", "BUILD_STRUCTURE", "SHOW_MINIMAP",
+                       "GOTO_LEVEL", "GOTO_NEXT_LEVEL"):
+        return 1
+    if intent_type in ("SAY_ONLY", "STORY_CONTINUE"):
+        return 2
+    if intent_type == "CREATE_STORY":
+        # keyword-based scoring
+        d5_keywords = ["子系统", "框架", "完整", "full system", "模块"]
+        d4_keywords = ["quest", "任务", "npc", "剖情", "多npc", "交互剧情"]
+        d3_keywords = ["场景", "剩情", "交互", "scene"]
+        d2_keywords = ["npc", "villager", "story", "剧情"]
+        if any(k in raw for k in d5_keywords):
+            return 5
+        if any(k in raw for k in d4_keywords) and "场景" in raw:
+            return 4
+        if any(k in raw for k in d3_keywords):
+            return 3
+        if any(k in raw for k in d2_keywords):
+            return 2
+        return 2
+    return 1
+
+
 def fallback_intents(text: str) -> List[Dict[str, Any]]:
     raw = text.strip()
     intents = []
@@ -311,6 +342,7 @@ def fallback_intents(text: str) -> List[Dict[str, Any]]:
             "title": raw[:12],
             "text": raw,
             "raw_text": raw,
+            "difficulty": _score_difficulty(raw, "CREATE_STORY"),
         }
         scene_theme, scene_hint = _extract_scene_theme_and_hint(raw)
         if scene_theme:
@@ -322,25 +354,86 @@ def fallback_intents(text: str) -> List[Dict[str, Any]]:
 
     # minimap - 扩展自然语言触发词
     if any(w in raw for w in ["地图", "minimap", "看地图", "小地图", "导航", "周围", "位置", "在哪", "地图在哪", "显示地图", "查看地图", "看看周围"]):
-        intents.append({"type": "SHOW_MINIMAP", "raw_text": raw})
+        intents.append({"type": "SHOW_MINIMAP", "raw_text": raw, "difficulty": 1})
 
     # time/weather
     if "白天" in raw:
-        intents.append({"type": "SET_DAY"})
+        intents.append({"type": "SET_DAY", "difficulty": 1})
     if "晚上" in raw or "夜" in raw:
-        intents.append({"type": "SET_NIGHT"})
+        intents.append({"type": "SET_NIGHT", "difficulty": 1})
     if "雨" in raw:
-        intents.append({"type": "SET_WEATHER", "weather": "rain"})
+        intents.append({"type": "SET_WEATHER", "weather": "rain", "difficulty": 1})
 
     # level
     lvl = normalize_level(raw)
     if lvl:
-        intents.append({"type": "GOTO_LEVEL", "level_id": lvl})
+        intents.append({"type": "GOTO_LEVEL", "level_id": lvl, "difficulty": 1})
 
     if not intents:
-        intents.append({"type": "SAY_ONLY", "raw_text": raw})
+        intents.append({"type": "SAY_ONLY", "raw_text": raw, "difficulty": 2})
 
     return intents
+
+
+# ============================================================
+# Phase 3: SceneTypeClassifier
+# classify_scene(text, intent_type) → "CONTENT" | "RULE" | "SIMULATION"
+#
+# Scene type semantics:
+#   CONTENT    → 默认路径，Drift Engine 直接生成世界内容
+#                关键词：建造 / 生成 / 召唤 / NPC 场景 / 故事剧情
+#   RULE       → 需要 AsyncAIFlow "编译器"，生成新的系统级规则
+#                关键词：游戏规则 / 投票 / 谁是卧底 / 赢得条件 / 计分
+#   SIMULATION → AsyncAIFlow + 持久状态，长期行为建模
+#                关键词：潜伏 / 实验 / 长期行为 / 模拟 / 状态跟踪
+# ============================================================
+
+_RULE_KEYWORDS = (
+    "游戏规则", "投票", "谁是卧底", "赢得条件", "计分", "得分",
+    "淘汰", "胜负", "积分", "game rule", "voting", "win condition",
+    "score", "eliminate", "tournament", "竞赛", "比赛", "排名",
+    "新规则", "改变规则", "系统规则",
+)
+
+_SIMULATION_KEYWORDS = (
+    "潜伏", "实验", "长期", "模拟", "状态跟踪", "行为", "演化",
+    "simulation", "experiment", "long term", "behavior", "tracking",
+    "持续", "日志", "记录", "监控", "侦测", "代理", "自治",
+)
+
+_CONTENT_KEYWORDS = (
+    "建造", "生成", "召唤", "场景", "故事", "剧情", "关卡",
+    "create", "build", "generate", "spawn", "scene", "story",
+    "npc", "地图", "世界", "环境",
+)
+
+
+def classify_scene(text: str, intent_type: str = "") -> str:
+    """
+    Rule-based scene type classifier.
+
+    Returns one of: "CONTENT" | "RULE" | "SIMULATION"
+    """
+    raw = str(text or "").lower()
+
+    # 世界命令类 intent 永远是 CONTENT（直接 Drift）
+    if intent_type.upper() in (
+        "SET_DAY", "SET_NIGHT", "SET_WEATHER", "TELEPORT",
+        "SPAWN_ENTITY", "BUILD_STRUCTURE", "GOTO_LEVEL", "GOTO_NEXT_LEVEL",
+        "SHOW_MINIMAP", "SAY_ONLY", "STORY_CONTINUE",
+    ):
+        return "CONTENT"
+
+    # SIMULATION 优先：长期状态类
+    if any(kw in raw for kw in _SIMULATION_KEYWORDS):
+        return "SIMULATION"
+
+    # RULE 次之：系统级规则生成
+    if any(kw in raw for kw in _RULE_KEYWORDS):
+        return "RULE"
+
+    # 默认 CONTENT
+    return "CONTENT"
 
 
 # ============================================================
@@ -350,6 +443,17 @@ def parse_intent(player_id, text, world_state, story_engine):
 
     ai_list = ai_parse_multi(text)
     intents = ai_list if ai_list else fallback_intents(text)
+
+    # 确保每个 intent 都有 difficulty 字段（AI 返回没有时补充）
+    for it in intents:
+        if "difficulty" not in it or not isinstance(it.get("difficulty"), int):
+            it["difficulty"] = _score_difficulty(
+                str(it.get("raw_text") or text or ""),
+                str(it.get("type") or "")
+            )
+        else:
+            # 验证范围
+            it["difficulty"] = max(1, min(5, int(it["difficulty"])))
 
     # 修正 level 格式
     for it in intents:
@@ -415,16 +519,17 @@ def parse_intent(player_id, text, world_state, story_engine):
 
             it.setdefault("title", (raw_text or text)[:12] or "新剧情")
             it.setdefault("text", raw_text or text)
-            it.setdefault("world_patch", {
-                "mc": {
-                    "spawn": {
-                        "type": "villager",
-                        "name": "桃子",
-                        "offset": {"dx": 2, "dy": 0, "dz": 2}
-                    },
-                    "tell": "✨ 新剧情已准备好，正在加载……"
-                }
-            })
+            # ── Phase 2: 不再注入假 world_patch ────────────────────────────
+            # world_patch 由 /story/inject 的 scene_orchestrator_v2 真实生成
+            # intent 只携带 scene_theme / scene_hint 语义提示
+
+    # ── Phase 3: 为每个 intent 附加 scene_type 分类 ─────────────────────────
+    for it in intents:
+        if "scene_type" not in it:
+            it["scene_type"] = classify_scene(
+                str(it.get("raw_text") or text or ""),
+                it.get("type", ""),
+            )
 
     return {
         "status": "ok",
